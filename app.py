@@ -1,497 +1,311 @@
-"""
-World Bank Group ITS Technical Assessment — Dash implementation
-
-Based on "Instructions - Technical Assessment.docx" and the supplied
-WB_ICT_Development_Dataset.xlsx workbook.
+"""World Bank ICT Development Dashboard
 
 Run:
     pip install -r requirements.txt
     python app.py
 
-Open:
-    http://127.0.0.1:8050
-
-The workbook contains 150 country-year rows (25 countries, 2018–2023).
-Missing metric values are not silently imputed. Aggregations use available
-observations and display coverage; the readiness score is blank if any of its
-three component indicators is missing.
+Keep violence_data.xlsx in the same folder as this file. The filename is
+retained for compatibility with the user's current project folder; the
+workbook itself contains World Bank ICT indicators, not VAWG survey data.
+Open http://127.0.0.1:8050
 """
-
 from pathlib import Path
 import os
-import numpy as np
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from dash import Dash, dcc, html, Input, Output, dash_table
+from dash import Dash, dcc, html, Input, Output, State, dash_table
 
-BASE = Path(__file__).resolve().parent
-SHEET = os.getenv("WB_SHEET_NAME", "WB_ICT_Development_Dataset")
+BASE_DIR = Path(__file__).resolve().parent
+DATA_PATH = Path(os.getenv("ICT_DATA_PATH", BASE_DIR / "violence_data.xlsx"))
+SHEET_NAME = os.getenv("ICT_SHEET_NAME", "WB_ICT_Development_Dataset")
 
-# Resolve the workbook from an explicit environment variable first.
-# Otherwise search the app folder and common data subfolders.
-configured_path = os.getenv("WB_DATA_PATH")
-if configured_path:
-    DATA_PATH = Path(configured_path).expanduser()
-    if not DATA_PATH.is_absolute():
-        DATA_PATH = (BASE / DATA_PATH).resolve()
-else:
-    workbook_name = "WB_ICT_Development_Dataset.xlsx"
-    candidates = [
-        BASE / workbook_name,
-        BASE / "data" / workbook_name,
-        BASE / "dataset" / workbook_name,
-        Path.cwd() / workbook_name,
-        Path.cwd() / "data" / workbook_name,
-        Path.cwd() / "dataset" / workbook_name,
-    ]
-    DATA_PATH = next((p.resolve() for p in candidates if p.is_file()), candidates[0].resolve())
-
-if not DATA_PATH.is_file():
-    raise FileNotFoundError(
-        "\\nWorld Bank dataset file was not found.\\n"
-        f"Expected filename: WB_ICT_Development_Dataset.xlsx\\n"
-        f"Application folder: {BASE}\\n"
-        "Fix: extract the COMPLETE project ZIP (not app.py alone), so the Excel "
-        "workbook is beside app.py; alternatively put it in a 'data' folder, "
-        "or set WB_DATA_PATH to the full workbook path.\\n"
-        "Example in Windows CMD:\\n"
-        'set WB_DATA_PATH=C:\\\\projectArena\\\\dondon\\\\machinelearning\\\\worldbank\\\\WB_ICT_Development_Dataset.xlsx'
-    )
-
-df = pd.read_excel(DATA_PATH, sheet_name=SHEET)
-df.columns = [" ".join(str(c).strip().split()) for c in df.columns]
-if "Country_Code" not in df.columns:
-    df = df.rename(columns={df.columns[0]: "Country_Code"})
-
-EXPECTED = [
+REQUIRED_COLUMNS = [
     "Country_Code", "Country_Name", "Region", "Income_Group", "Year",
     "Internet_Users_Pct", "Mobile_Subscriptions_Per100",
     "Fixed_Broadband_Per100", "GDP_Per_Capita_USD", "GDP_Growth_Rate_Pct",
     "School_Enrollment_Secondary_Pct", "Govt_Expenditure_Education_Pct_GDP",
     "Digital_Skills_Workforce_Pct", "IT_Project_Completion_Rate_Pct",
-    "Cybersecurity_Index_Score"
+    "Cybersecurity_Index_Score", "Data_Status", "Data_Method",
 ]
-missing_cols = [c for c in EXPECTED if c not in df.columns]
-if missing_cols:
-    raise ValueError(f"Dataset is missing required columns: {missing_cols}")
 
-METRICS = [
-    "Internet_Users_Pct", "Mobile_Subscriptions_Per100", "Fixed_Broadband_Per100",
-    "GDP_Per_Capita_USD", "GDP_Growth_Rate_Pct",
-    "School_Enrollment_Secondary_Pct", "Govt_Expenditure_Education_Pct_GDP",
-    "Digital_Skills_Workforce_Pct", "IT_Project_Completion_Rate_Pct",
-    "Cybersecurity_Index_Score"
-]
-LABELS = {
-    "Internet_Users_Pct": "Internet users (%)",
-    "Mobile_Subscriptions_Per100": "Mobile subscriptions per 100",
-    "Fixed_Broadband_Per100": "Fixed broadband per 100",
-    "GDP_Per_Capita_USD": "GDP per capita (USD)",
-    "GDP_Growth_Rate_Pct": "GDP growth (%)",
-    "School_Enrollment_Secondary_Pct": "Secondary enrollment (%)",
-    "Govt_Expenditure_Education_Pct_GDP": "Education spending (% GDP)",
-    "Digital_Skills_Workforce_Pct": "Digital skills workforce (%)",
-    "IT_Project_Completion_Rate_Pct": "IT project completion (%)",
-    "Cybersecurity_Index_Score": "Cybersecurity score"
-}
-for c in METRICS + ["Year"]:
-    df[c] = pd.to_numeric(df[c], errors="coerce")
-for c in ["Country_Code", "Country_Name", "Region", "Income_Group"]:
-    df[c] = df[c].astype("string").str.strip()
-df = df.dropna(subset=["Country_Name", "Year"]).copy()
+if not DATA_PATH.exists():
+    raise FileNotFoundError(
+        f"Dataset not found: {DATA_PATH}\n"
+        "Place violence_data.xlsx beside app.py or set ICT_DATA_PATH."
+    )
+if DATA_PATH.suffix.lower() in {".xlsx", ".xls"}:
+    try:
+        df = pd.read_excel(DATA_PATH, sheet_name=SHEET_NAME)
+    except ValueError as exc:
+        raise ValueError(
+            f"Worksheet '{SHEET_NAME}' was not found in {DATA_PATH.name}. "
+            "Set ICT_SHEET_NAME to a valid worksheet name."
+        ) from exc
+elif DATA_PATH.suffix.lower() == ".csv":
+    df = pd.read_csv(DATA_PATH)
+else:
+    raise ValueError("Supported dataset formats are .xlsx, .xls and .csv.")
+
+missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+if missing:
+    raise ValueError(
+        "The selected file does not match the World Bank ICT dataset schema.\n"
+        f"Missing columns: {missing}\nFound columns: {list(df.columns)}"
+    )
+
+NUMERIC_COLUMNS = [c for c in REQUIRED_COLUMNS if c not in {
+    "Country_Code", "Country_Name", "Region", "Income_Group", "Data_Status", "Data_Method"
+}]
+for col in NUMERIC_COLUMNS:
+    df[col] = pd.to_numeric(df[col], errors="coerce")
+df["Year"] = df["Year"].astype("Int64")
+df = df.dropna(subset=["Year", "Country_Name"]).copy()
 df["Year"] = df["Year"].astype(int)
-df = df.sort_values(["Country_Name", "Year"]).reset_index(drop=True)
+df = df.sort_values(["Country_Name", "Year"])
 
-# Transparent complete-case score from the three weighted components.
-# Clamp to the assessment's requested 30–85 display range.
-raw_score = (
-    .40 * df["Internet_Users_Pct"] +
-    .35 * df["Digital_Skills_Workforce_Pct"] +
-    .25 * df["Cybersecurity_Index_Score"]
-)
-complete_score = df[["Internet_Users_Pct", "Digital_Skills_Workforce_Pct",
-                     "Cybersecurity_Index_Score"]].notna().all(axis=1)
-df["Digital_Readiness_Score"] = np.where(
-    complete_score, raw_score.clip(lower=30, upper=85), np.nan
-)
+METRICS = {
+    "Internet users (%)": "Internet_Users_Pct",
+    "Mobile subscriptions (per 100 people)": "Mobile_Subscriptions_Per100",
+    "Fixed broadband (per 100 people)": "Fixed_Broadband_Per100",
+    "GDP per capita (US$)": "GDP_Per_Capita_USD",
+    "GDP growth (%)": "GDP_Growth_Rate_Pct",
+    "Secondary school enrollment (%)": "School_Enrollment_Secondary_Pct",
+    "Government education spending (% GDP)": "Govt_Expenditure_Education_Pct_GDP",
+    "Digital skills workforce (%)": "Digital_Skills_Workforce_Pct",
+    "IT project completion (%)": "IT_Project_Completion_Rate_Pct",
+    "Cybersecurity index score": "Cybersecurity_Index_Score",
+}
+METRIC_LABELS = {v: k for k, v in METRICS.items()}
+NAVY = "#14213D"
+BLUE = "#3977B8"
+TEAL = "#0F8B8D"
+ORANGE = "#D97706"
+GREEN = "#27856A"
+RED = "#C94C4C"
+PURPLE = "#8064A2"
+LIGHT = "#F3F6FA"
+MUTED = "#687386"
+PALETTE = [NAVY, TEAL, ORANGE, BLUE, GREEN, PURPLE, RED]
 
-NAVY = "#203864"
-BLUE = "#4472C4"
-TEAL = "#16A085"
-GREEN = "#70AD47"
-RED = "#C00000"
-GOLD = "#ED7D31"
-BG = "#F3F6FA"
-INK = "#172B4D"
-MUTED = "#65758B"
-PALETTE = [NAVY, BLUE, TEAL, GOLD, GREEN, "#8064A2", "#C0504D"]
-GRID = "#E5EAF1"
+app = Dash(__name__, title="World Bank ICT Development Dashboard")
+server = app.server
 
-def records(frame):
-    # Convert directly to dictionaries; avoid deprecated read_json(literal_json)
-    # and normalize pandas/NumPy missing values for Dash serialization.
-    clean = frame.astype(object).where(pd.notna(frame), None)
-    return clean.to_dict("records")
 
-def fmt(value, suffix=""):
-    return "—" if pd.isna(value) else f"{value:,.2f}{suffix}"
+def options_for(col):
+    vals = sorted(df[col].dropna().unique().tolist(), key=lambda x: str(x))
+    return [{"label": "All", "value": "__ALL__"}] + [
+        {"label": str(v), "value": str(v)} for v in vals
+    ]
 
-def filtered(year, region, income, country):
-    d = df.copy()
-    if year not in (None, "ALL"):
-        d = d[d.Year == int(year)]
-    if region not in (None, "ALL"):
-        d = d[d.Region == region]
-    if income not in (None, "ALL"):
-        d = d[d.Income_Group == income]
-    if country not in (None, "ALL"):
-        d = d[d.Country_Name == country]
-    return d
 
-def chart_layout(fig, title, height=430):
+def card(label, value, sub=""):
+    return html.Div([
+        html.Div(label, className="kpi-label"),
+        html.Div(value, className="kpi-value"),
+        html.Div(sub, className="kpi-sub"),
+    ], className="kpi-card")
+
+
+def base_layout(fig, title, height=360):
     fig.update_layout(
-        template="plotly_white", title={"text": title, "x": .02, "font": {"size": 16, "color": NAVY}},
-        height=height, margin={"l": 55, "r": 25, "t": 65, "b": 65},
-        font={"family": "Arial", "size": 11, "color": INK},
+        template="plotly_white", title={"text": title, "x": 0.025, "xanchor": "left",
+        "font": {"size": 15, "color": NAVY}}, height=height,
+        margin={"l": 48, "r": 24, "t": 62, "b": 55},
+        font={"family": "Arial, sans-serif", "size": 11, "color": NAVY},
         paper_bgcolor="white", plot_bgcolor="white",
-        legend={"orientation": "h", "y": -0.2}
+        legend={"orientation": "h", "y": -0.22},
     )
     fig.update_xaxes(showgrid=False, automargin=True)
-    fig.update_yaxes(gridcolor=GRID, zeroline=False, automargin=True)
+    fig.update_yaxes(showgrid=True, gridcolor="#E8ECF2", zeroline=False, automargin=True)
     return fig
 
-def card(title, value_id, sub):
-    return html.Div(className="kpi", children=[
-        html.Div(title, className="kpi-label"),
-        html.Div(id=value_id, className="kpi-value"),
-        html.Div(sub, className="kpi-sub")
-    ])
 
-def section(title, subtitle=None):
-    return html.Div([html.H2(title, className="section-title"),
-                     html.P(subtitle, className="section-sub") if subtitle else None])
+def empty_fig(message="No records match the selected filters."):
+    fig = go.Figure()
+    fig.add_annotation(text=message, x=.5, y=.5, xref="paper", yref="paper", showarrow=False)
+    return base_layout(fig, "No data available")
 
-def table_component(columns, data, page_size=12):
-    return dash_table.DataTable(
-        columns=columns, data=data, page_size=page_size,
-        sort_action="native", filter_action="native",
-        style_table={"overflowX": "auto"},
-        style_cell={"fontFamily":"Arial","fontSize":11,"padding":"9px",
-                    "textAlign":"left","minWidth":"100px","maxWidth":"260px",
-                    "whiteSpace":"normal"},
-        style_header={"backgroundColor":NAVY,"color":"white","fontWeight":"bold"},
-        style_data={"borderColor":GRID},
-        style_data_conditional=[
-            {"if":{"row_index":"odd"},"backgroundColor":"#F7F9FC"}
-        ]
-    )
 
-app = Dash(__name__, title="World Bank ITS | Technical Assessment", suppress_callback_exceptions=True)
-server = app.server
-app.index_string = """<!DOCTYPE html><html><head>{%metas%}<title>{%title%}</title>{%favicon%}{%css%}
-<style>
-*{box-sizing:border-box}body{margin:0;background:#F3F6FA;color:#172B4D;font-family:Arial,sans-serif}
-.header{background:#203864;color:white;padding:22px 4%;border-bottom:5px solid #16A085}
-.header h1{font-size:24px;margin:0 0 6px}.header p{font-size:12px;color:#DCE6F1;margin:0}
-.wrap{max-width:1500px;margin:auto;padding:20px 3% 45px}
-.section-title{font-size:17px;color:#203864;margin:22px 0 6px}
-.section-sub{font-size:12px;color:#65758B;margin:0 0 12px;line-height:1.5}
-.filters,.panel{background:white;border:1px solid #E1E7EF;border-radius:9px;padding:15px}
-.filters{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:12px}
-.flab{font-size:10px;text-transform:uppercase;font-weight:bold;color:#65758B;margin-bottom:5px;display:block}
-.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
-.kpi{background:white;border:1px solid #E1E7EF;border-radius:9px;padding:15px;min-height:105px}
-.kpi-label{font-size:10px;color:#65758B;font-weight:bold;text-transform:uppercase}
-.kpi-value{font-size:25px;font-weight:bold;color:#203864;margin:9px 0 4px}
-.kpi-sub{font-size:10px;color:#65758B}
-.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:14px}
-.panel h3{font-size:14px;color:#203864;margin:0 0 8px}
-.callout{background:#EAF4F8;border-left:4px solid #4472C4;border-radius:6px;padding:14px 16px;font-size:12px;line-height:1.65}
-.answer{background:white;border:1px solid #E1E7EF;border-radius:9px;padding:16px;margin:12px 0}
-.answer h3{font-size:14px;margin:0 0 8px;color:#203864}
-.answer p{font-size:12px;line-height:1.65;color:#33445B;margin:0}
-.code{background:#F3F6FA;border:1px solid #E1E7EF;padding:10px;border-radius:6px;font-family:Consolas,monospace;font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}
-.tab-content{padding-top:8px}.footer{font-size:10px;color:#65758B;text-align:center;margin-top:25px}
-@media(max-width:850px){.filters,.kpis,.grid2{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:560px){.filters,.kpis,.grid2{grid-template-columns:1fr}.header h1{font-size:19px}}
-</style></head><body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer></body></html>"""
+def filtered_data(region, income, country, status, years):
+    data = df.copy()
+    if region != "__ALL__":
+        data = data[data.Region.astype(str) == region]
+    if income != "__ALL__":
+        data = data[data.Income_Group.astype(str) == income]
+    if country != "__ALL__":
+        data = data[data.Country_Name.astype(str) == country]
+    if status != "__ALL__":
+        data = data[data.Data_Status.astype(str) == status]
+    if years and len(years) == 2:
+        data = data[data.Year.between(int(years[0]), int(years[1]))]
+    return data
 
-year_options = [{"label":"All years","value":"ALL"}] + [
-    {"label":str(y),"value":int(y)} for y in sorted(df.Year.unique())
-]
-region_options = [{"label":"All regions","value":"ALL"}] + [
-    {"label":r,"value":r} for r in sorted(df.Region.dropna().unique())
-]
-income_options = [{"label":"All income groups","value":"ALL"}] + [
-    {"label":r,"value":r} for r in sorted(df.Income_Group.dropna().unique())
-]
-country_options = [{"label":"All countries","value":"ALL"}] + [
-    {"label":r,"value":r} for r in sorted(df.Country_Name.dropna().unique())
-]
 
-def render_page(page):
-    if page == "overview":
-        return html.Div([
-            section("Executive filters","All KPI cards and visuals respond to the selected year, region, income group and country."),
-            section("Executive KPIs","The selected year defaults to 2023; choose All years to view the full period."),
-            html.Div(className="kpis",children=[
-                card("Average internet users (%)","kpi-internet","Mean of available observations"),
-                card("Average digital readiness score","kpi-readiness","Weighted score, 30–85 display range"),
-                card("Average IT project completion (%)","kpi-project","Mean of available observations"),
-                card("YoY internet change (pp)","kpi-yoy","Selected year versus prior year")
-            ]),
-            html.Div(id="yoy-note",className="callout",style={"marginTop":"12px"}),
-            html.Div(className="grid2",children=[
-                html.Div(className="panel",children=[dcc.Graph(id="map-chart",config={"displayModeBar":False})]),
-                html.Div(className="panel",children=[dcc.Graph(id="readiness-chart",config={"displayModeBar":False})]),
-                html.Div(className="panel",children=[dcc.Graph(id="trend-chart",config={"displayModeBar":False})]),
-                html.Div(className="panel",children=[dcc.Graph(id="skills-chart",config={"displayModeBar":False})])
-            ]),
-            section("Digital readiness score — DAX definition"),
-            html.Div(className="panel",children=[
-                html.Div("Calculated column (row-level):",className="flab"),
-                html.Div(
-"""Digital_Readiness_Score =
-VAR Internet = 'WB_ICT_Development_Dataset'[Internet_Users_Pct]
-VAR Skills = 'WB_ICT_Development_Dataset'[Digital_Skills_Workforce_Pct]
-VAR Cyber = 'WB_ICT_Development_Dataset'[Cybersecurity_Index_Score]
-VAR WeightedScore = 0.40 * Internet + 0.35 * Skills + 0.25 * Cyber
-RETURN
-IF(
-    ISBLANK(Internet) || ISBLANK(Skills) || ISBLANK(Cyber),
-    BLANK(),
-    MIN(85, MAX(30, WeightedScore))
-)""",className="code"),
-                html.P("The score is calculated only when all three components are present. The 30–85 cap is applied to meet the assessment's stated display range; it should be disclosed because it compresses values outside that interval.",className="section-sub")
-            ])
-        ])
-    return html.Div([
-        section("Analysis & written answers","This page covers the Excel-style summaries and the three written questions in Part C of the assessment."),
-        section("Part A — Excel analysis","The following tables reproduce the requested calculations in an interactive web view."),
-        html.Div(className="grid2",children=[
-            html.Div(className="panel",children=[
-                html.H3("Average Internet Users % by income group — 2023"),
-                html.Div(id="income-summary")
-            ]),
-            html.Div(className="panel",children=[
-                html.H3("Data quality — missing values by column"),
-                html.Div(id="quality-table")
-            ])
-        ]),
-        html.Div(className="panel",style={"marginTop":"14px"},children=[
-            html.H3("Pivot-style table — average IT project completion by region and year"),
-            html.Div(id="pivot-table")
-        ]),
-        section("Part C — written responses","Each response follows the assessment's requested concise format."),
-        html.Div(className="answer",children=[
-            html.H3("Question 1 — Which region should be prioritized for digital skills investment?"),
-            html.Div(id="answer-q1")
-        ]),
-        html.Div(className="answer",children=[
-            html.H3("Question 2 — How were missing values identified and handled?"),
-            html.P(
-                f"The dataset contains {int(df[METRICS].isna().sum().sum())} missing metric cells out of "
-                f"{len(df) * len(METRICS)} metric cells ({df[METRICS].isna().sum().sum()/(len(df)*len(METRICS))*100:.2f}%). "
-                "I identified them with a column-level null count and missing-percentage check. "
-                "I retained the original missing values rather than replacing them with invented values; "
-                "each indicator average uses available observations, and the digital readiness score is left blank "
-                "when any of its three components is missing. This preserves observed data but means coverage varies "
-                "by indicator, so leaders should review sample counts alongside averages."
-            )
-        ]),
-        html.Div(className="answer",children=[
-            html.H3("Question 3 — What additional data source would add the most value?"),
-            html.P(
-                "A country-level, year-by-year dataset on public-sector ICT project delivery from the World Bank's "
-                "project portfolio (including approved budget, actual expenditure, implementation status, completion "
-                "date and results indicators) would add the most value. It would let ITS leadership connect digital "
-                "readiness and skills gaps to the performance, cost and outcomes of actual technology investments, "
-                "helping distinguish countries that need foundational capacity from those that need stronger project execution."
-            )
-        ]),
-        section("Assessment notes"),
-        html.Div(className="callout",children=[
-            "Source basis: the uploaded World Bank Group ITS Technical Assessment (3 pages) and the supplied "
-            "WB_ICT_Development_Dataset workbook. The assessment specifies 150 rows, 25 countries, six years "
-            "(2018–2023), and approximately 5% intentionally missing values. The data supplied here contains "
-            "150 rows and 10 metric columns; the missing rate is calculated over those metric cells."
-        ])
-    ])
-
-# Keep both page layouts mounted in the DOM at all times. The tab control
-# only changes display styles, so every callback target always exists.
-shared_filters = html.Div(className="filters", children=[
-    html.Div([html.Label("Year", className="flab"),
-              dcc.Dropdown(id="year-filter", options=year_options, value=2023, clearable=False)]),
-    html.Div([html.Label("Region", className="flab"),
-              dcc.Dropdown(id="region-filter", options=region_options, value="ALL", clearable=False)]),
-    html.Div([html.Label("Income group", className="flab"),
-              dcc.Dropdown(id="income-filter", options=income_options, value="ALL", clearable=False)]),
-    html.Div([html.Label("Country", className="flab"),
-              dcc.Dropdown(id="country-filter", options=country_options, value="ALL", clearable=False)])
-])
+min_year, max_year = int(df.Year.min()), int(df.Year.max())
+status_options = options_for("Data_Status")
 
 app.layout = html.Div([
-    html.Div(className="header", children=[
-        html.H1("WORLD BANK GROUP | ITS — DIGITAL DEVELOPMENT INSIGHTS"),
-        html.P("Technical Assessment Dashboard • Country-level digital readiness and IT performance • 2018–2023")
-    ]),
-    html.Div(className="wrap", children=[
-        dcc.Tabs(id="main-tabs", value="overview", children=[
-            dcc.Tab(label="Page 1 — Executive Overview", value="overview"),
-            dcc.Tab(label="Page 2 — Analysis & Written Answers", value="analysis")
+    html.Header([
+        html.Div([
+            html.Div("WORLD BANK | DIGITAL DEVELOPMENT", className="eyebrow"),
+            html.H1("ICT Development Dashboard"),
+            html.P("Explore connectivity, digital capacity and supporting development indicators across countries and years."),
         ]),
-        html.Div(className="tab-content", children=[
-            html.H2("DATA EXPLORER — FILTERS", className="section-title"),
-            shared_filters,
-            html.Div(id="overview-page", children=render_page("overview")),
-            html.Div(id="analysis-page", children=render_page("analysis"), style={"display":"none"})
-        ])
-    ])
-])
+        html.Div([html.Span("DATASET", className="header-tag"),
+                  html.Strong(f"{df.Country_Name.nunique()} countries · {min_year}–{max_year}")], className="header-meta")
+    ], className="hero"),
+    html.Div([
+        html.Aside([
+            html.H3("Filters"),
+            html.Label("Region"),
+            dcc.Dropdown(id="region-filter", options=options_for("Region"), value="__ALL__", clearable=False),
+            html.Label("Income group"),
+            dcc.Dropdown(id="income-filter", options=options_for("Income_Group"), value="__ALL__", clearable=False),
+            html.Label("Country"),
+            dcc.Dropdown(id="country-filter", options=options_for("Country_Name"), value="__ALL__", clearable=False),
+            html.Label("Data status"),
+            dcc.Dropdown(id="status-filter", options=status_options, value="__ALL__", clearable=False),
+            html.Label("Year range"),
+            dcc.RangeSlider(id="year-filter", min=min_year, max=max_year, step=1,
+                value=[min_year, max_year], marks={y: str(y) for y in range(min_year, max_year + 1, 5)} | {max_year: str(max_year)},
+                tooltip={"placement": "bottom", "always_visible": False}),
+            html.Div(id="filter-count", className="filter-count"),
+            html.Button("Reset filters", id="reset-filters", n_clicks=0, className="reset-button"),
+        ], className="sidebar"),
+        html.Main([
+            html.Div(id="kpi-row", className="kpi-grid"),
+            html.Div([
+                html.Div([
+                    html.Label("Indicator for trend and comparison"),
+                    dcc.Dropdown(id="metric-filter", options=[{"label": k, "value": v} for k, v in METRICS.items()],
+                                 value="Internet_Users_Pct", clearable=False),
+                ], className="metric-picker"),
+                html.Div(id="metric-note", className="metric-note"),
+            ], className="metric-toolbar"),
+            html.Div([
+                dcc.Graph(id="trend-chart", config={"displayModeBar": False}),
+                dcc.Graph(id="region-chart", config={"displayModeBar": False}),
+            ], className="chart-grid"),
+            html.Div([
+                dcc.Graph(id="scatter-chart", config={"displayModeBar": False}),
+                dcc.Graph(id="heatmap-chart", config={"displayModeBar": False}),
+            ], className="chart-grid"),
+            html.Section([
+                html.Div([html.H3("Country-year records"),
+                          html.Button("Download filtered data (CSV)", id="download-button", className="download-button")], className="table-heading"),
+                dash_table.DataTable(id="data-table", page_size=12, sort_action="native", filter_action="native",
+                    style_table={"overflowX": "auto"},
+                    style_header={"backgroundColor": "#EEF2F7", "fontWeight": "700", "color": NAVY, "border": "0"},
+                    style_cell={"padding": "9px", "fontFamily": "Arial", "fontSize": "11px", "textAlign": "left", "border": "0", "borderBottom": "1px solid #EDF0F4", "minWidth": "105px", "maxWidth": "220px", "whiteSpace": "normal"},
+                    style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#FAFBFD"}]),
+                dcc.Download(id="download-data"),
+            ], className="table-panel"),
+            html.Div([
+                html.Strong("Data interpretation: "),
+                "The workbook includes original 2018–2023 observations and modeled historical estimates / projections for other years. Check Data Status and Data Method before interpreting trends. Modeled values are not official observed statistics."
+            ], className="disclaimer"),
+        ], className="main-content")
+    ], className="dashboard-body")
+], className="app-shell")
+
 
 @app.callback(
-    Output("overview-page", "style"),
-    Output("analysis-page", "style"),
-    Input("main-tabs", "value")
+    Output("region-filter", "value"), Output("income-filter", "value"),
+    Output("country-filter", "value"), Output("status-filter", "value"),
+    Output("year-filter", "value"), Input("reset-filters", "n_clicks"),
+    prevent_initial_call=True,
 )
-def switch_page(page):
-    if page == "analysis":
-        return {"display":"none"}, {"display":"block"}
-    return {"display":"block"}, {"display":"none"}
+def reset_filters(_):
+    return "__ALL__", "__ALL__", "__ALL__", "__ALL__", [min_year, max_year]
+
 
 @app.callback(
-    Output("kpi-internet","children"), Output("kpi-readiness","children"),
-    Output("kpi-project","children"), Output("kpi-yoy","children"),
-    Output("yoy-note","children"), Output("map-chart","figure"),
-    Output("readiness-chart","figure"), Output("trend-chart","figure"),
-    Output("skills-chart","figure"),
-    Input("year-filter","value"), Input("region-filter","value"),
-    Input("income-filter","value"), Input("country-filter","value"),
-    prevent_initial_call=False
+    Output("kpi-row", "children"), Output("filter-count", "children"),
+    Output("metric-note", "children"), Output("trend-chart", "figure"),
+    Output("region-chart", "figure"), Output("scatter-chart", "figure"),
+    Output("heatmap-chart", "figure"), Output("data-table", "data"),
+    Output("data-table", "columns"),
+    Input("region-filter", "value"), Input("income-filter", "value"),
+    Input("country-filter", "value"), Input("status-filter", "value"),
+    Input("year-filter", "value"), Input("metric-filter", "value"),
 )
-def update_overview(year, region, income, country):
-    d = filtered(year, region, income, country)
-    internet = d["Internet_Users_Pct"].mean()
-    readiness = d["Digital_Readiness_Score"].mean()
-    project = d["IT_Project_Completion_Rate_Pct"].mean()
+def update_dashboard(region, income, country, status, years, metric):
+    data = filtered_data(region, income, country, status, years)
+    metric_label = METRIC_LABELS.get(metric, metric)
+    count_text = f"{len(data):,} records · {data.Country_Name.nunique()} countries"
+    if data.empty:
+        blank = empty_fig()
+        return [card("Countries", "0"), card("Years", "—"), card("Selected indicator", "—"), card("Regions", "0")], count_text, "No records available for this selection.", blank, blank, blank, blank, [], []
 
-    selected_year = int(year) if year != "ALL" else int(df.Year.max())
-    prev = filtered(selected_year-1, region, income, country)
-    curr = filtered(selected_year, region, income, country)
-    yoy = curr["Internet_Users_Pct"].mean() - prev["Internet_Users_Pct"].mean()
-    yoy_text = (
-        f"Year-over-year Internet Users change: {yoy:+.2f} percentage points "
-        f"({selected_year} average minus {selected_year-1} average). "
-        "Positive change is favorable; negative change indicates a decline. "
-        "If a country/region filter is applied, both years use that same filter."
-        if pd.notna(yoy) else
-        f"YoY change is unavailable for {selected_year}: one of the two years has no usable Internet Users observations under the current filters."
-    )
+    metric_values = data[metric].dropna()
+    avg = metric_values.mean() if not metric_values.empty else float("nan")
+    latest_year = int(data.Year.max())
+    latest = data[data.Year == latest_year][metric].mean()
+    avg_text = f"{avg:,.2f}" if pd.notna(avg) else "N/A"
+    latest_text = f"{latest:,.2f}" if pd.notna(latest) else "N/A"
+    kpis = [
+        card("Countries", f"{data.Country_Name.nunique():,}", "In current selection"),
+        card("Regions", f"{data.Region.nunique():,}", "Represented in selection"),
+        card("Year coverage", f"{data.Year.min()}–{data.Year.max()}", f"{data.Year.nunique()} annual periods"),
+        card(f"Average · {metric_label}", avg_text, f"Latest year ({latest_year}): {latest_text}"),
+    ]
+    note = f"Selected indicator: {metric_label}. Values are averaged across available country-year records in the current filter selection; missing values are excluded."
 
-    if d["Internet_Users_Pct"].notna().any():
-        m = d.dropna(subset=["Internet_Users_Pct"])
-        map_fig = px.choropleth(
-            m, locations="Country_Code", locationmode="ISO-3",
-            color="Internet_Users_Pct", hover_name="Country_Name",
-            hover_data={"Income_Group":True,"Region":True,"Internet_Users_Pct":":.1f","Country_Code":False},
-            color_continuous_scale="Blues", range_color=(0,100)
-        )
-        map_fig.update_layout(geo={"showframe":False,"showcoastlines":True,"projection_type":"natural earth"},
-                              coloraxis_colorbar={"title":"Internet users %"})
-    else:
-        map_fig = go.Figure()
-        map_fig.add_annotation(text="No Internet Users data for this selection",showarrow=False,x=.5,y=.5)
-    chart_layout(map_fig,"World map — Internet users by country")
+    trend_data = data.groupby(["Year", "Region"], as_index=False)[metric].mean()
+    trend = px.line(trend_data, x="Year", y=metric, color="Region", markers=True,
+                    color_discrete_sequence=PALETTE)
+    trend.update_layout(yaxis_title=metric_label, xaxis_title="Year")
+    trend = base_layout(trend, f"{metric_label} · trend by region", 370)
 
-    by_country = d.groupby("Country_Name",as_index=False)["Digital_Readiness_Score"].mean().dropna()
-    by_country = by_country.sort_values("Digital_Readiness_Score").tail(12)
-    readiness_fig = px.bar(by_country,x="Digital_Readiness_Score",y="Country_Name",orientation="h",
-                           color="Digital_Readiness_Score",color_continuous_scale="Teal")
-    chart_layout(readiness_fig,"Countries — average digital readiness score")
+    region_data = data.groupby("Region", as_index=False)[metric].mean().sort_values(metric)
+    region_fig = px.bar(region_data, x=metric, y="Region", orientation="h", color="Region",
+                         color_discrete_sequence=PALETTE, text_auto=".2s")
+    region_fig.update_layout(xaxis_title=metric_label, yaxis_title=None, showlegend=False)
+    region_fig = base_layout(region_fig, f"Regional comparison · {metric_label}", 370)
 
-    trend = d.groupby("Year",as_index=False)["Internet_Users_Pct"].mean()
-    trend_fig = px.line(trend,x="Year",y="Internet_Users_Pct",markers=True)
-    trend_fig.update_traces(line={"color":TEAL,"width":3},marker={"size":8})
-    chart_layout(trend_fig,"Internet use trend over time")
+    scatter_data = data.dropna(subset=["GDP_Per_Capita_USD", metric]).copy()
+    if len(scatter_data) > 3000:
+        scatter_data = scatter_data.sample(3000, random_state=42)
+    scatter = px.scatter(scatter_data, x="GDP_Per_Capita_USD", y=metric, color="Income_Group",
+                         hover_data=["Country_Name", "Year", "Region", "Data_Status"],
+                         color_discrete_sequence=PALETTE, opacity=.72)
+    scatter.update_layout(xaxis_title="GDP per capita (US$)", yaxis_title=metric_label)
+    scatter = base_layout(scatter, f"GDP per capita vs. {metric_label}", 390)
 
-    skills = d.groupby("Region",as_index=False)["Digital_Skills_Workforce_Pct"].mean().sort_values("Digital_Skills_Workforce_Pct")
-    skills_fig = px.bar(skills,x="Digital_Skills_Workforce_Pct",y="Region",orientation="h",
-                        color="Digital_Skills_Workforce_Pct",color_continuous_scale="Teal")
-    chart_layout(skills_fig,"Digital skills workforce by region")
+    heat_data = data.groupby(["Region", "Year"], as_index=False)[metric].mean()
+    pivot = heat_data.pivot(index="Region", columns="Year", values=metric)
+    heat = go.Figure(data=go.Heatmap(z=pivot.values, x=pivot.columns, y=pivot.index,
+                                     colorscale="Blues", colorbar={"title": metric_label}))
+    heat = base_layout(heat, f"Regional heatmap · {metric_label}", 390)
 
-    yoy_value = "—" if pd.isna(yoy) else f"{yoy:+.2f} pp"
-    return fmt(internet,"%"), fmt(readiness), fmt(project,"%"), yoy_value, yoy_text, map_fig, readiness_fig, trend_fig, skills_fig
+    display_cols = ["Country_Code", "Country_Name", "Region", "Income_Group", "Year", metric, "Data_Status"]
+    table = data[display_cols].sort_values(["Year", "Country_Name"], ascending=[False, True]).copy()
+    table[metric] = table[metric].round(2)
+    table = table.where(pd.notna(table), None)
+    columns = [{"name": (metric_label if c == metric else c.replace("_", " ")), "id": c} for c in display_cols]
+    return kpis, count_text, note, trend, region_fig, scatter, heat, table.to_dict("records"), columns
+
 
 @app.callback(
-    Output("income-summary","children"), Output("quality-table","children"),
-    Output("pivot-table","children"), Output("answer-q1","children"),
-    Input("year-filter","value"), Input("region-filter","value"),
-    Input("income-filter","value"), Input("country-filter","value")
+    Output("download-data", "data"), Input("download-button", "n_clicks"),
+    State("region-filter", "value"), State("income-filter", "value"),
+    State("country-filter", "value"), State("status-filter", "value"),
+    State("year-filter", "value"), prevent_initial_call=True,
 )
-def update_analysis(year, region, income, country):
-    # Part A task 1 is specifically 2023, and is not altered by the dashboard year slicer.
-    y23 = df[df.Year == 2023]
-    inc = y23.groupby("Income_Group")["Internet_Users_Pct"].agg(["mean","count"]).reset_index()
-    inc.columns = ["Income group","Average Internet users %","Available records"]
-    inc["Average Internet users %"] = inc["Average Internet users %"].round(2)
-    inc_table = table_component(
-        [{"name":c,"id":c} for c in inc.columns], records(inc), page_size=8
-    )
+def download_filtered(_, region, income, country, status, years):
+    data = filtered_data(region, income, country, status, years)
+    return dcc.send_data_frame(data.to_csv, "world_bank_ict_filtered.csv", index=False)
 
-    missing_count = df.isna().sum()
-    quality = pd.DataFrame({
-        "Column": df.columns,
-        "Missing count": [int(missing_count[c]) for c in df.columns],
-        "Missing %": [round(float(missing_count[c] / len(df) * 100), 2) for c in df.columns]
-    })
-    def risk(p):
-        if p < 3: return "Clean"
-        if p <= 10: return "Review"
-        return "High Risk"
-    quality["Flag"] = quality["Missing %"].map(risk)
-    q_table = table_component([{"name":c,"id":c} for c in quality.columns],records(quality),page_size=16)
 
-    pivot = df.pivot_table(index="Region",columns="Year",values="IT_Project_Completion_Rate_Pct",aggfunc="mean").round(2).reset_index()
-    pivot.columns = [str(c) for c in pivot.columns]
-    p_table = dash_table.DataTable(
-        columns=[{"name":c,"id":c} for c in pivot.columns],data=records(pivot),
-        style_table={"overflowX":"auto"},
-        style_cell={"fontFamily":"Arial","fontSize":11,"padding":"9px","textAlign":"center"},
-        style_header={"backgroundColor":NAVY,"color":"white","fontWeight":"bold"},
-        style_data_conditional=[
-            {"if":{"filter_query":f"{{{str(y)}}} = {pivot[str(y)].min()}","column_id":str(y)},"backgroundColor":"#F4CCCC","color":"#990000"}
-            for y in sorted(df.Year.unique())
-        ] + [
-            {"if":{"filter_query":f"{{{str(y)}}} = {pivot[str(y)].max()}","column_id":str(y)},"backgroundColor":"#D9EAD3","color":"#274E13"}
-            for y in sorted(df.Year.unique())
-        ]
-    )
-
-    # Evidence-based recommendation uses the full 2018–2023 period for stability.
-    reg = df.groupby("Region")["Digital_Skills_Workforce_Pct"].agg(["mean","count"]).sort_values("mean")
-    lowest_region = reg.index[0]
-    lowest_mean = reg.iloc[0]["mean"]
-    second_region = reg.index[1]
-    second_mean = reg.iloc[1]["mean"]
-    y23_reg = df[df.Year==2023].groupby("Region")["Digital_Skills_Workforce_Pct"].agg(["mean","count"]).sort_values("mean")
-    current_sentence = ""
-    if lowest_region in y23_reg.index:
-        current_sentence = (
-            f" In 2023, {lowest_region} averaged {y23_reg.loc[lowest_region,'mean']:.2f}% "
-            f"({int(y23_reg.loc[lowest_region,'count'])} available country records)."
-        )
-    answer = html.P(
-        f"Prioritize {lowest_region} for digital-skills investment: it has the lowest average "
-        f"Digital_Skills_Workforce_Pct across 2018–2023 at {lowest_mean:.2f}% "
-        f"({int(reg.iloc[0]['count'])} available country-year records). "
-        f"{second_region} is the next-lowest region at {second_mean:.2f}%, so it should be considered "
-        f"the next priority.{current_sentence} The recommendation is based on the indicator averages in "
-        "this dataset, not on a causal assessment; regional sample sizes and missing observations should "
-        "be considered when allocating resources."
-    )
-    return inc_table, q_table, p_table, answer
+app.index_string = """<!DOCTYPE html>
+<html><head>{%metas%}<title>{%title%}</title>{%favicon%}{%css%}
+<style>
+*{box-sizing:border-box}body{margin:0;background:#F3F6FA;color:#14213D;font-family:Arial,sans-serif}.app-shell{min-height:100vh}.hero{background:#14213D;color:white;padding:28px 34px;display:flex;justify-content:space-between;align-items:center;gap:20px}.eyebrow{font-size:10px;letter-spacing:1.8px;color:#8DD2D0;font-weight:700}.hero h1{font-size:27px;margin:8px 0 7px}.hero p{margin:0;color:#D6DEEA;font-size:13px}.header-meta{text-align:right;min-width:180px}.header-meta strong{display:block;margin-top:8px;font-size:13px}.header-tag{font-size:9px;letter-spacing:1.5px;color:#9DAFC7}.dashboard-body{display:grid;grid-template-columns:260px minmax(0,1fr);gap:20px;padding:20px;max-width:1700px;margin:auto}.sidebar,.table-panel,.kpi-card,.metric-toolbar,.chart-grid>div{background:white;border:1px solid #E5EAF1;border-radius:10px;box-shadow:0 2px 8px rgba(20,33,61,.035)}.sidebar{padding:19px;height:max-content;position:sticky;top:16px}.sidebar h3{margin:0 0 18px;font-size:16px}.sidebar label,.metric-picker label{display:block;font-size:11px;font-weight:700;margin:14px 0 7px;color:#4E5B70}.sidebar .Select-control{border-color:#DDE3EC}.filter-count{font-size:11px;color:#687386;margin:20px 0 12px}.reset-button,.download-button{border:0;border-radius:6px;background:#14213D;color:white;padding:10px 13px;font-size:11px;font-weight:700;cursor:pointer}.reset-button{width:100%;background:#EEF2F7;color:#14213D}.main-content{min-width:0}.kpi-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:15px}.kpi-card{padding:16px}.kpi-label{font-size:10px;color:#687386;font-weight:700}.kpi-value{font-size:24px;font-weight:700;margin:9px 0 4px;color:#14213D}.kpi-sub{font-size:10px;color:#8A94A5}.metric-toolbar{padding:13px 16px;margin-bottom:14px}.metric-picker{max-width:450px}.metric-picker label{margin:0 0 7px}.metric-note{font-size:10px;color:#687386;margin-top:8px}.chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-bottom:14px}.chart-grid>div{min-width:0;overflow:hidden}.chart-grid .dash-graph{width:100%}.table-panel{padding:17px;margin-top:4px}.table-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:13px}.table-heading h3{margin:0;font-size:15px}.disclaimer{font-size:11px;line-height:1.6;color:#5D687A;background:#EAF0F6;border-left:3px solid #0F8B8D;padding:12px 14px;margin-top:14px;border-radius:4px}.disclaimer strong{color:#14213D}
+@media(max-width:1050px){.dashboard-body{grid-template-columns:1fr}.sidebar{position:static}.kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:700px){.hero{padding:22px;display:block}.header-meta{text-align:left;margin-top:18px}.dashboard-body{padding:12px}.chart-grid{grid-template-columns:1fr}.kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.table-heading{align-items:flex-start;flex-direction:column}}
+</style></head><body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer></body></html>"""
 
 if __name__ == "__main__":
-    app.run(debug=True, host="127.0.0.1", port=8050)
+    app.run(debug=os.getenv("DASH_DEBUG", "false").lower() == "true", host="127.0.0.1", port=int(os.getenv("PORT", "8050")))
